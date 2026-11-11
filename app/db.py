@@ -1,15 +1,39 @@
 """SQLite 访问层。"""
 
 import hashlib
+import hmac
 import os
+import secrets
 import sqlite3
 from pathlib import Path
 
 BASE_DIR = Path(__file__).resolve().parent.parent
 
+_PBKDF2_ITERATIONS = 200_000
+
 
 def hash_password(password: str) -> str:
-    return hashlib.sha256(password.encode("utf-8")).hexdigest()
+    """带随机盐的 PBKDF2-HMAC-SHA256，格式 pbkdf2$iterations$salt$digest。"""
+    salt = secrets.token_hex(16)
+    digest = hashlib.pbkdf2_hmac(
+        "sha256", password.encode("utf-8"), bytes.fromhex(salt), _PBKDF2_ITERATIONS
+    ).hex()
+    return f"pbkdf2${_PBKDF2_ITERATIONS}${salt}${digest}"
+
+
+def verify_password(password: str, stored: str) -> bool:
+    if stored.startswith("pbkdf2$"):
+        try:
+            _, iterations, salt, digest = stored.split("$")
+            candidate = hashlib.pbkdf2_hmac(
+                "sha256", password.encode("utf-8"), bytes.fromhex(salt), int(iterations)
+            ).hex()
+        except (ValueError, TypeError):
+            return False
+        return hmac.compare_digest(candidate, digest)
+    # 兼容旧库里的无盐 SHA-256 记录（仅用于校验，新口令一律走 PBKDF2）
+    legacy = hashlib.sha256(password.encode("utf-8")).hexdigest()
+    return hmac.compare_digest(legacy, stored)
 
 
 def db_path() -> str:
@@ -94,13 +118,21 @@ def get_document(doc_id: int):
         conn.close()
 
 
-def search_documents(term: str):
+def search_documents(term: str, owner_id: int, is_admin: bool = False):
+    """关键词检索。普通用户只能搜到自己的文档，管理员可见全部。"""
+    like = f"%{term}%"
     conn = connect()
     try:
-        query = (
+        if is_admin:
+            return conn.execute(
+                "SELECT id, owner_id, title, body FROM documents "
+                "WHERE title LIKE ? OR body LIKE ?",
+                (like, like),
+            ).fetchall()
+        return conn.execute(
             "SELECT id, owner_id, title, body FROM documents "
-            f"WHERE title LIKE '%{term}%' OR body LIKE '%{term}%'"
-        )
-        return conn.execute(query).fetchall()
+            "WHERE (title LIKE ? OR body LIKE ?) AND owner_id = ?",
+            (like, like, owner_id),
+        ).fetchall()
     finally:
         conn.close()

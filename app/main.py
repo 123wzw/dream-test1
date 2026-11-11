@@ -35,7 +35,7 @@ class PreviewIn(BaseModel):
 @app.post("/auth/login")
 def login(payload: LoginIn):
     user = db.get_user_by_email(payload.email)
-    if user is None or user["password_hash"] != db.hash_password(payload.password):
+    if user is None or not db.verify_password(payload.password, user["password_hash"]):
         raise HTTPException(status_code=401, detail="invalid credentials")
     return {
         "token": create_token(user),
@@ -45,7 +45,7 @@ def login(payload: LoginIn):
 
 @app.get("/documents/search")
 def search(q: str = "", user: dict = Depends(current_user)):
-    rows = db.search_documents(q)
+    rows = db.search_documents(q, owner_id=int(user["sub"]), is_admin=user.get("role") == "admin")
     return {"items": [dict(row) for row in rows]}
 
 
@@ -60,12 +60,17 @@ def read_document(doc_id: int, user: dict = Depends(current_user)):
     row = db.get_document(doc_id)
     if row is None:
         raise HTTPException(status_code=404, detail="document not found")
+    if row["owner_id"] != int(user["sub"]) and user.get("role") != "admin":
+        raise HTTPException(status_code=403, detail="not your document")
     return dict(row)
 
 
 @app.post("/files")
 def upload_file(payload: FileIn, user: dict = Depends(current_user)):
-    size = storage.save_file(payload.name, payload.content.encode("utf-8"))
+    try:
+        size = storage.save_file(payload.name, payload.content.encode("utf-8"))
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from None
     return {"name": payload.name, "size": size}
 
 
@@ -73,6 +78,8 @@ def upload_file(payload: FileIn, user: dict = Depends(current_user)):
 def download_file(name: str, user: dict = Depends(current_user)):
     try:
         data = storage.read_file(name)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from None
     except FileNotFoundError:
         raise HTTPException(status_code=404, detail="file not found")
     return PlainTextResponse(data.decode("utf-8", "replace"))

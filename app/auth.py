@@ -40,11 +40,15 @@ def decode_token(token: str) -> dict:
     if len(parts) != 3:
         raise HTTPException(status_code=401, detail="malformed token")
 
-    header = json.loads(_b64d(parts[0]))
-    payload = json.loads(_b64d(parts[1]))
+    try:
+        header = json.loads(_b64d(parts[0]))
+        payload = json.loads(_b64d(parts[1]))
+    except Exception:
+        raise HTTPException(status_code=401, detail="malformed token") from None
 
-    if header.get("alg") == "none":
-        return payload
+    # 只接受 HS256；alg=none 或其它算法一律拒绝，且必须先验签再看 payload
+    if header.get("alg") != "HS256":
+        raise HTTPException(status_code=401, detail="unsupported algorithm")
 
     signing_input = f"{parts[0]}.{parts[1]}".encode()
     expected = _b64e(hmac.new(SECRET.encode(), signing_input, hashlib.sha256).digest())
